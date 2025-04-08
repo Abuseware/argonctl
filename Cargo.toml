@@ -1,0 +1,16 @@
+[package]
+name = "argonctl"
+authors = ["Artur Kaleta <akaleta@protonmail.com>"]
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+smol = "2"
+clap = { version = "4", features = ["derive"] }
+log = { version = "0", features = ["release_max_level_info", "max_level_debug"] }
+env_logger = "0"
+zbus = { version = "5", features = ["time"] }
+i2cdev = "0"
+nix = "0"
+ctrlc = { version = "3", features = ["termination"] }
+daemonize = { version = "0", features = [] }
