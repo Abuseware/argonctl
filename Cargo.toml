@@ -13,4 +13,4 @@ zbus = { version = "5", features = ["time"] }
 i2cdev = "0"
 nix = "0"
 ctrlc = { version = "3", features = ["termination"] }
-daemonize = { version = "0", features = [] }
+daemonize = "0"
