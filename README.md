@@ -20,14 +20,17 @@ The attached configuration only allows `argond` to be run as root or nobody.
 Usage: argond [OPTIONS]
 
 Options:
-      --temp-low <TEMP_LOW>    Low temperature treshold [default: 35]
-      --temp-high <TEMP_HIGH>  High temperature treshold [default: 65]
-      --log-scale              Use logarithmic scaling instead of linear
-  -d, --daemon                 Forking to background with dropped privileges
-  -u, --uid <UID>              User for dropped privileges [default: nobody]
-  -l, --log <LOG>              Log file [default: /var/log/argond.log]
-  -h, --help                   Print help
+      --temp-low <TEMP_LOW>      Low temperature treshold
+      --temp-high <TEMP_HIGH>    High temperature treshold
+      --log-scale [<LOG_SCALE>]  Use logarithmic scaling instead of linear [possible values: true, false]
+  -d, --daemon                   Forking to background with dropped privileges
+  -u, --uid <UID>                User for dropped privileges
+  -l, --log <LOG>                Log file
+  -c, --config <CONFIG>          Configuration file
+  -h, --help                     Print help
 ```
+
+If you specify configuration file, it'll be stored on shutdown, and loaded on startup. TOML format.
 
 ## Argon
 
@@ -46,7 +49,8 @@ Options:
 ```
 
 ## Batteries not included
-Currently, the cooling control is very simple, with plans to add thresholds and delays.
+Currently, cooling control is very simple; decisions are made based on differences in averaged samples.
+The algorithm prefers a rapid increase in speed and a slowed-down deceleration.
 
 There is no possibility to program the IR receiver, OLED extension, or DAC.
 The temperature is read only from the Pi itself,

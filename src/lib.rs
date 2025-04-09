@@ -1,69 +1,67 @@
+use std::sync::Arc;
 use smol::lock::Mutex;
-use clap::Parser;
+use crate::config::Config;
 
-#[derive(Parser, Debug, Clone)]
-pub struct Config {
-    /// Low temperature treshold
-    #[arg(long, default_value_t = 35.0)]
-    pub temp_low: f32,
-    /// High temperature treshold
-    #[arg(long, default_value_t = 65.0)]
-    pub temp_high: f32,
-    /// Use logarithmic scaling instead of linear
-    #[arg(long)]
-    pub log_scale: bool,
-    /// Forking to background with dropped privileges
-    #[arg(short, long, default_value_t = false)]
-    pub daemon: bool,
-    /// User for dropped privileges
-    #[arg(short, long, default_value = "nobody")]
-    pub uid: Box<str>,
-    /// Log file
-    #[arg(short, long, default_value = "/var/log/argond.log")]
-    pub log: Box<str>,
+pub mod config;
+
+pub struct DbusController {
+    config: Arc<Mutex<Config>>,
+    kill_signal: smol::channel::Sender<()>
 }
 
-pub static ARGS: std::sync::LazyLock<Mutex<Config>> = std::sync::LazyLock::new(|| {
-    let mut cfg = Config::parse();
-    cfg.temp_low = cfg.temp_low.clamp(0.0, cfg.temp_high.max(0.0));
-    cfg.temp_high = cfg.temp_high.max(cfg.temp_low);
-    log::debug!("Args: {:#?}", cfg);
-    Mutex::new(cfg)
-
-});
-
-pub static KILLSWITCH: std::sync::OnceLock<smol::channel::Sender<()>> = std::sync::OnceLock::new();
-
-pub struct RpcController;
+impl DbusController {
+    pub fn new(config: Arc<Mutex<Config>>, kill_signal: smol::channel::Sender<()>) -> Self {
+        Self {
+            config,
+            kill_signal
+        }
+    }
+}
 
 #[zbus::interface(name = "xyz.abuseware.argond1", proxy(default_path = "/xyz/abuseware/Argond", default_service = "xyz.abuseware.argond"))]
-impl RpcController {
-    async fn set_low(&self, celcius: f32) -> f32 {
-        let mut args = ARGS.lock().await;
-        let celcius_clamp = celcius.clamp(0.0, args.temp_high);
-        args.temp_low = celcius_clamp;
-        log::debug!("Setting low temp to {celcius_clamp}, requested {celcius}");
-        celcius_clamp
+impl DbusController {
+    #[zbus(property)]
+    async fn low(&self) -> f64 {
+        self.config.lock().await.temp_low() as f64
     }
 
-    async fn set_high(&self, celcius: f32) -> f32 {
-        let mut args = ARGS.lock().await;
-        let celcius_clamp = celcius.max(args.temp_low);
-        args.temp_high = celcius_clamp;
-        log::debug!("Setting high temp to {celcius_clamp}, requested {celcius}");
-        celcius_clamp
+    #[zbus(property)]
+    async fn high(&self) -> f64 {
+        self.config.lock().await.temp_high() as f64
+    }
+
+    #[zbus(property)]
+    async fn log_scale(&self) -> bool {
+        self.config.lock().await.log_scale()
+    }
+
+    async fn set_low(&self, celsius: f32) -> f32 {
+        let mut args = self.config.lock().await;
+        args.set_temp_low(celsius);
+        let r = args.temp_low();
+        log::debug!("Setting low temp to {r}, requested {celsius}");
+        r
+    }
+
+    async fn set_high(&self, celsius: f32) -> f32 {
+        let mut args = self.config.lock().await;
+        args.set_temp_high(celsius);
+        let r = args.temp_high();
+        log::debug!("Setting high temp to {r}, requested {celsius}");
+        r
     }
 
     async fn set_log_scale(&self, log: bool) -> bool {
-        ARGS.lock().await.log_scale = log;
+        self.config.lock().await.set_log_scale(log);
         log::debug!("Setting log scale: {log}");
         true
     }
 
     async fn exit(&self) -> bool {
-        if let Some(ks) = KILLSWITCH.get() {
-           return ks.send(()).await.is_ok();
-        }
-        false
+            self.kill_signal.send(()).await.is_ok()
+    }
+
+    async fn ping(&self) -> bool {
+        true
     }
 }

@@ -1,36 +1,26 @@
+mod device;
+
+use std::sync::Arc;
 use smol::prelude::*;
-use i2cdev::core::*;
-use i2cdev::linux::LinuxI2CError;
-use argonctl::{RpcController, ARGS, KILLSWITCH};
+use smol::lock::Mutex;
+use argonctl::config::Config;
+use argonctl::DbusController;
+use crate::device::{ArgonDevice, ArgonDeviceError};
 
-static FAN: std::sync::LazyLock<std::sync::Mutex<i2cdev::linux::LinuxI2CDevice>> = std::sync::LazyLock::new(|| {
-    let fan = match i2cdev::linux::LinuxI2CDevice::new("/dev/i2c-1", 0x1a) {
-        Ok(fan) => fan,
-        Err(LinuxI2CError::Errno(no)) => {
-            let e = nix::errno::Errno::from_raw(no);
-            panic!("{e}");
-        }
-        Err(LinuxI2CError::Io(io)) => {
-            panic!("{io}");
-        }
-    };
-
-    std::sync::Mutex::new(fan)
-});
-
-fn main() {
+fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    FAN.try_lock().ok();
-    //let executor = smol::LocalExecutor::new();
+    let config = Config::load()?;
+
+    let device = ArgonDevice::new("/dev/i2c-1")?;
+    let device =  Arc::new(Mutex::new(device));
+
     {
-        let args = ARGS.lock_blocking();
-        if args.daemon {
-            let log = std::fs::File::create(args.log.as_ref()).unwrap();
-            log.set_len(0).unwrap();
+        if config.daemon() {
+            let log = std::fs::File::create(config.log().as_ref())?;
             //let err = std::fs::File::create("argond.err").unwrap();
             if let Err(e) = daemonize::Daemonize::new()
-                .user(args.uid.as_ref())
+                .user(config.uid().as_ref())
                 .working_directory("/")
                 .stderr(log)
                 .start() {
@@ -39,85 +29,113 @@ fn main() {
         }
     }
 
+    let config = Arc::new(Mutex::new(config));
+
     let (killswitch_tx, killswitch_rx) = smol::channel::bounded::<()>(10);
 
-    KILLSWITCH.set(killswitch_tx.clone()).unwrap();
-
+    let ctrlc_ks = killswitch_tx.clone();
     ctrlc::set_handler(move || {
-        log::info!("Exiting!");
-        if killswitch_tx.send_blocking(()).is_err() {
+        if ctrlc_ks.send_blocking(()).is_err() {
             std::process::exit(1);
         };
-    }).unwrap();
+    })?;
 
-    //smol::future::block_on(executor.run(fan_task()));
-    smol::block_on(async {
-        let _rpc = match rpc().await {
+    let executor = smol::LocalExecutor::new();
+
+    smol::future::block_on(executor.run(async {
+
+        if let Ok(rpc) = zbus::Connection::system().await {
+            if let Ok(ctl) = argonctl::DbusControllerProxy::new(&rpc).await {
+                if ctl.ping().await.is_ok_and(|v| v) {
+                    log::error!("Daemon already running!");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        let _rpc = match rpc(config.clone(), killswitch_tx.clone()).await {
             Ok(rpc) => Some(rpc),
             Err(e) => {
                 log::warn!("Cannot create RPC: {e}");
                 None
             }
         };
-        fan_task(killswitch_rx).await;
-    });
+        smol::spawn(fan_task(config.clone(), device.clone())).detach();
 
+        let _ = killswitch_rx.recv().await;
+        log::info!("Shutting down...");
+        device.lock().await.set_fan_speed(100).unwrap();
+    }));
+
+    if let Err(e) = config.lock_blocking().save() {
+        log::warn!("Cannot save config: {e}");
+    }
+
+    Ok(())
 }
 
-async fn rpc() -> Result<zbus::Connection, zbus::Error> {
+async fn rpc(config: Arc<Mutex<Config>>, kill_signal: smol::channel::Sender<()>) -> Result<zbus::Connection, zbus::Error> {
+    let ctl = DbusController::new(config, kill_signal);
     zbus::connection::Builder::system()?
         .name("xyz.abuseware.argond")?
-        .serve_at("/xyz/abuseware/Argond", RpcController)?
+        .serve_at("/xyz/abuseware/Argond", ctl)?
         .build()
         .await
 }
 
-async fn fan_task(killswitch: smol::channel::Receiver<()>) {
-    let mut iv = smol::Timer::interval(std::time::Duration::from_millis(500));
+async fn fan_task(config: Arc<Mutex<Config>>, device: Arc<Mutex<ArgonDevice>>) -> Result<(), ArgonDeviceError> {
+    device.lock().await.set_fan_speed(0)?;
+    let mut iv = smol::Timer::interval(std::time::Duration::from_millis(200));
+    let mut samples = Vec::with_capacity(50);
+    let mut last_avg = read_temp().await;
+    let mut idle_timer: Option<std::time::Instant> = None;
     loop {
-        if let Ok(_) = killswitch.try_recv() {
-            log::info!("Shutting down...");
-            set_fan_speed(0);
-            break;
-        }
         let temp = read_temp().await;
-        let percent = if ARGS.lock().await.log_scale { calc_speed_log(temp).await } else { calc_speed_linear(temp).await };
-        let speed = percent.round() as u8;
-        if speed != fan_speed() {
-            log::debug!("Setting speed to {speed}%, temp {temp}°C");
-            if !set_fan_speed(speed) {
-                log::error!("Cannot lock i2c");
+        samples.push(temp);
+
+        if samples.len() >= 5 {
+            let temp_avg = samples.iter().sum::<f32>() / samples.len() as f32;
+            samples.clear();
+
+            let delta = temp_avg - last_avg;
+
+            let delta_trigger = delta >= 0.5 || delta <= -5.0;
+            let timer_trigger = idle_timer.as_ref().is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(5));
+
+            if delta_trigger || timer_trigger {
+                idle_timer = None;
+                let config = config.lock().await;
+                let speed = calc_speed(&config, temp_avg).await.round() as u8;
+                let mut device = device.lock().await;
+                if speed != device.fan_speed()? {
+                    log::debug!("Setting speed to {speed}%, temp {temp_avg:.2}°C");
+                    device.set_fan_speed(speed)?;
+                }
+                last_avg = temp_avg;
+            } else if idle_timer.is_none() {
+                last_avg = temp_avg;
+                idle_timer = Some(std::time::Instant::now())
             }
         }
         iv.next().await;
     }
 }
 
-async fn calc_speed_log(temperature: f32) -> f32 {
-    let args = ARGS.lock().await;
-    let temp_range = args.temp_high - args.temp_low;
-    let temp_rel = (temperature - args.temp_low).clamp(0.0, temp_range) + 1.0;
-    let log_temp_rel = temp_rel.log10();
-    let log_temp_rel_min = 1.0f32.log10();
-    let log_temp_rel_max = (temp_range + 1.0).log10();
+async fn calc_speed(config: &Config, temperature: f32) -> f32 {
+    if config.log_scale() { calc_speed_log(config, temperature).await } else { calc_speed_linear(config, temperature).await }
+}
+
+async fn calc_speed_log(config: &Config, temperature: f32) -> f32 {
+    let temp_rel = (temperature - config.temp_low()).clamp(0.0, config.temp_range()) + 1.0;
+    let log_temp_rel = temp_rel.log2();
+    let log_temp_rel_min = 1.0f32.log2();
+    let log_temp_rel_max = (config.temp_range() + 1.0).log2();
     ((log_temp_rel - log_temp_rel_min) / (log_temp_rel_max - log_temp_rel_min)) * 100.0
 }
 
-async fn calc_speed_linear(temperature: f32) -> f32 {
-    let args = ARGS.lock().await;
-    let temp_range = args.temp_high - args.temp_low;
-    let temp_clamped = temperature.clamp(args.temp_low, args.temp_high);
-    ((temp_clamped - args.temp_low) / temp_range) * 100.0
-}
-
-#[inline]
-fn fan_speed() -> u8 {
-    FAN.lock().ok().and_then(|mut f| f.smbus_read_byte_data(0x80).ok()).unwrap_or_default()
-}
-
-#[inline]
-fn set_fan_speed(speed: u8) -> bool {
-    FAN.lock().ok().and_then(|mut f| f.smbus_write_byte_data(0x80, speed).ok()).is_some()
+async fn calc_speed_linear(config: &Config, temperature: f32) -> f32 {
+    let temp_clamped = temperature.clamp(config.temp_low(), config.temp_high());
+    ((temp_clamped - config.temp_low()) / config.temp_range()) * 100.0
 }
 
 async fn read_temp() -> f32 {

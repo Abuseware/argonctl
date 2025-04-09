@@ -4,11 +4,6 @@ authors = ["Artur Kaleta <akaleta@protonmail.com>"]
 version = "0.1.0"
 edition = "2024"
 
-[profile.dev]
-#debug = 1
-opt-level = 1
-#lto = "thin"
-
 [profile.release]
 lto = "fat"
 opt-level = 3
@@ -17,13 +12,7 @@ strip = "debuginfo"
 
 [profile.release.package."*"]
 opt-level = 3
-codegen-units = 1
-
-[profile.dev.package."*"]
-opt-level = 3
-codegen-units = 1
-debug-assertions = false
-overflow-checks = false
+#codegen-units = 1
 
 
 [dependencies]
@@ -31,8 +20,12 @@ smol = "2"
 clap = { version = "4", features = ["derive"] }
 log = { version = "0", features = ["release_max_level_info", "max_level_debug"] }
 env_logger = "0"
+anyhow = { version = "1", features = ["backtrace"] }
+thiserror = "2"
 zbus = { version = "5", features = ["time"] }
 i2cdev = "0"
 nix = "0"
-ctrlc = { version = "3", features = ["termination"] }
 daemonize = "0"
+ctrlc = { version = "3", features = ["termination"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0"
