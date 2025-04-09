@@ -87,10 +87,12 @@ async fn fan_task(config: Arc<Mutex<Config>>, device: Arc<Mutex<ArgonDevice>>) -
     device.lock().await.set_fan_speed(0)?;
     let mut iv = smol::Timer::interval(std::time::Duration::from_millis(200));
     let mut samples = Vec::with_capacity(50);
-    let mut last_avg = read_temp().await;
+    let mut last_avg = read_temp_pi().await;
     let mut idle_timer: Option<std::time::Instant> = None;
     loop {
-        let temp = read_temp().await;
+        let temp_pi = read_temp_pi().await;
+        let temp_ssd = read_temp_ssd().await;
+        let temp = temp_pi.max(temp_ssd);
         samples.push(temp);
 
         if samples.len() >= 5 {
@@ -103,12 +105,13 @@ async fn fan_task(config: Arc<Mutex<Config>>, device: Arc<Mutex<ArgonDevice>>) -
             let timer_trigger = idle_timer.as_ref().is_some_and(|t| t.elapsed() >= std::time::Duration::from_secs(5));
 
             if delta_trigger || timer_trigger {
+                log::debug!("Reason: delta: {delta_trigger}, timer: {timer_trigger}");
                 idle_timer = None;
                 let config = config.lock().await;
                 let speed = calc_speed(&config, temp_avg).await.round() as u8;
                 let mut device = device.lock().await;
                 if speed != device.fan_speed()? {
-                    log::debug!("Setting speed to {speed}%, temp {temp_avg:.2}°C");
+                    log::debug!("Setting speed to {speed}%, temp sampled {temp_avg:.2}°C; Current pi: {temp_pi:.2}°C{}", if temp_ssd > 0.0 {format!(", ssd: {temp_ssd:.2}°C")} else {"".to_string()});
                     device.set_fan_speed(speed)?;
                 }
                 last_avg = temp_avg;
@@ -138,7 +141,16 @@ async fn calc_speed_linear(config: &Config, temperature: f32) -> f32 {
     ((temp_clamped - config.temp_low()) / config.temp_range()) * 100.0
 }
 
-async fn read_temp() -> f32 {
+async fn read_temp_pi() -> f32 {
     let data = smol::fs::read_to_string("/sys/class/thermal/thermal_zone0/temp").await.unwrap();
     data.trim().parse::<f32>().unwrap_or(f32::NAN) / 1000.0
+}
+
+async fn read_temp_ssd() -> f32 {
+    if let Ok(data) = smol::fs::read_to_string("/sys/class/nvme/nvme0/hwmon1/temp1_input").await {
+        let ssd_temp = data.trim().parse::<f32>().unwrap_or(f32::NAN) / 1000.0;
+        ssd_temp
+    } else {
+        0.0
+    }
 }

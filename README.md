@@ -37,7 +37,7 @@ If you specify configuration file, it'll be stored on shutdown, and loaded on st
 Argon is a program that allows changing operating parameters on the fly. Available parameters:
 
 ```
-Usage: argon <--temp-low <TEMP_LOW>|--temp-high <TEMP_HIGH>|--log-scale <LOG_SCALE>|--exit>
+Usage: argon [OPTIONS]
 
 Options:
       --temp-low <TEMP_LOW>    Low temperature treshold
@@ -45,7 +45,6 @@ Options:
       --log-scale <LOG_SCALE>  Use linear scaling instead of logarithmic [possible values: true, false]
       --exit                   Exit daemon
   -h, --help                   Print help
-
 ```
 
 ## Batteries not included
@@ -53,8 +52,6 @@ Currently, cooling control is very simple; decisions are made based on differenc
 The algorithm prefers a rapid increase in speed and a slowed-down deceleration.
 
 There is no possibility to program the IR receiver, OLED extension, or DAC.
-The temperature is read only from the Pi itself,
-the SSD is not taken into account (which the original software also does not do).
 
 After the cooling control module is completed, the remaining functions will be implemented.
 However, I would like to emphasize immediately that I do not have OLED and DAC modules,
