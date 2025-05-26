@@ -1,3 +1,6 @@
+# MOVED TO https://git.sr.ht/~abuseware/argonctl
+**Copilot can go be creative on its own code**
+
 # Argon One v3 Controller
 Simple Argon One v3 Raspberry Pi 5 case controller.
 
